@@ -16,8 +16,10 @@ set -Eeuo pipefail
 # Configuration (a adapter)
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="${PROJECT_DIR:-$SCRIPT_DIR}"
+PROJECT_DIR="$(cd "${PROJECT_DIR:-$SCRIPT_DIR}" && pwd)"
 LOG_DIR="${LOG_DIR:-$PROJECT_DIR/logs}"
+mkdir -p "$LOG_DIR"
+LOG_DIR="$(cd "$LOG_DIR" && pwd)"
 JOBS="${JOBS:-$(nproc 2>/dev/null || echo 1)}"
 
 ALL_STEPS=(clean configure build test)
@@ -62,7 +64,10 @@ run_step() {
     info "=== Debut etape : $step ==="
     start=$(date +%s)
 
-    "step_$step" 2>&1 | tee "$logfile"
+    # Execution dans le shell courant (pas de sous-shell) pour que les
+    # variables exportees par une etape restent visibles pour les suivantes
+    "step_$step" > >(tee "$logfile") 2>&1
+    wait $! 2>/dev/null || true
 
     end=$(date +%s)
     info "=== Fin etape : $step ($((end - start))s) ==="
@@ -113,9 +118,7 @@ main() {
         esac
     done
 
-    [[ ${#steps[@]} -eq 0 ]] && steps=("${ALL_STEPS[@]}")
-
-    mkdir -p "$LOG_DIR"
+    [[ $# -eq 0 ]] && steps=("${ALL_STEPS[@]}")
 
     local global_start=$(date +%s)
     for step in "${steps[@]}"; do
