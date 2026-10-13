@@ -4,10 +4,14 @@
 #
 # Etapes : clean -> configure -> build -> test
 #
+# Le script est independant du projet : le projet a traiter est le
+# repertoire courant, ou celui passe avec -p / PROJECT_DIR.
+#
 # Usage :
-#   ./build_and_test.sh              # execute toutes les etapes
-#   ./build_and_test.sh clean build  # execute seulement les etapes listees
-#   ./build_and_test.sh -h           # affiche l'aide
+#   cd /chemin/projet && /chemin/build_and_test.sh   # toutes les etapes
+#   ./build_and_test.sh -p /chemin/projet            # projet explicite
+#   ./build_and_test.sh -p /chemin/projet clean build
+#   ./build_and_test.sh -h                           # affiche l'aide
 #
 
 set -Eeuo pipefail
@@ -15,11 +19,8 @@ set -Eeuo pipefail
 # ---------------------------------------------------------------------------
 # Configuration (a adapter)
 # ---------------------------------------------------------------------------
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(cd "${PROJECT_DIR:-$SCRIPT_DIR}" && pwd)"
-LOG_DIR="${LOG_DIR:-$PROJECT_DIR/logs}"
-mkdir -p "$LOG_DIR"
-LOG_DIR="$(cd "$LOG_DIR" && pwd)"
+PROJECT_DIR="${PROJECT_DIR:-$PWD}"
+LOG_DIR="${LOG_DIR:-}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || echo 1)}"
 
 ALL_STEPS=(clean configure build test)
@@ -38,13 +39,17 @@ die() {
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") [etape ...]
+Usage: $(basename "$0") [-p repertoire_projet] [etape ...]
 
 Etapes disponibles : ${ALL_STEPS[*]}
-Sans argument, toutes les etapes sont executees dans l'ordre.
+Sans etape, toutes les etapes sont executees dans l'ordre.
+
+Options :
+  -p, --project DIR  Repertoire du projet (prioritaire sur PROJECT_DIR)
+  -h, --help         Affiche cette aide
 
 Variables d'environnement :
-  PROJECT_DIR  Repertoire du projet (defaut : $SCRIPT_DIR)
+  PROJECT_DIR  Repertoire du projet (defaut : repertoire courant)
   LOG_DIR      Repertoire des logs  (defaut : \$PROJECT_DIR/logs)
   JOBS         Nombre de jobs make  (defaut : nombre de CPU)
 EOF
@@ -110,15 +115,28 @@ step_test() {
 main() {
     local steps=()
 
-    for arg in "$@"; do
-        case "$arg" in
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
             -h|--help) usage; exit 0 ;;
-            clean|configure|build|test) steps+=("$arg") ;;
-            *) usage; die "Etape inconnue : $arg" ;;
+            -p|--project)
+                [[ $# -ge 2 ]] || die "Option $1 : repertoire manquant"
+                PROJECT_DIR="$2"
+                shift ;;
+            clean|configure|build|test) steps+=("$1") ;;
+            *) usage; die "Argument inconnu : $1" ;;
         esac
+        shift
     done
 
-    [[ $# -eq 0 ]] && steps=("${ALL_STEPS[@]}")
+    [[ -z "${steps[*]:-}" ]] && steps=("${ALL_STEPS[@]}")
+
+    # Chemins absolus : les etapes changent de repertoire courant
+    [[ -d "$PROJECT_DIR" ]] || die "Repertoire projet introuvable : $PROJECT_DIR"
+    PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+    LOG_DIR="${LOG_DIR:-$PROJECT_DIR/logs}"
+    mkdir -p "$LOG_DIR"
+    LOG_DIR="$(cd "$LOG_DIR" && pwd)"
+    info "Projet : $PROJECT_DIR"
 
     local global_start=$(date +%s)
     for step in "${steps[@]}"; do
