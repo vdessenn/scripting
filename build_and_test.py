@@ -9,6 +9,7 @@ Usage :
   ./build_and_test.py                             # execute toutes les etapes
   ./build_and_test.py clean build                 # seulement les etapes listees
   ./build_and_test.py --debug_level DEBUG build   # niveau de log (defaut : INFO)
+  ./build_and_test.py --debug_level 10 build      # idem, en valeur numerique
   ./build_and_test.py -h                          # affiche l'aide
 """
 
@@ -29,7 +30,9 @@ LOG_DIR = Path(os.environ.get("LOG_DIR") or PROJECT_DIR / "logs").resolve()
 JOBS = int(os.environ.get("JOBS") or os.cpu_count() or 1)
 
 ALL_STEPS = ["clean", "configure", "build", "test"]
-DEBUG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+# Niveaux du module logging : NOTSET=0, DEBUG=10, INFO=20, WARNING=30,
+# ERROR=40, CRITICAL=50
+DEBUG_LEVELS = ["NOTSET", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 DEFAULT_DEBUG_LEVEL = "INFO"
 
 log = logging.getLogger("build_and_test")
@@ -38,6 +41,16 @@ log = logging.getLogger("build_and_test")
 # ---------------------------------------------------------------------------
 # Utilitaires
 # ---------------------------------------------------------------------------
+def debug_level(value):
+    """Type argparse : nom de niveau (ex. INFO, info) ou valeur numerique (ex. 20)."""
+    if value.isdigit():
+        return int(value)
+    if value.upper() in DEBUG_LEVELS:
+        return getattr(logging, value.upper())
+    raise argparse.ArgumentTypeError(
+        f"niveau invalide : {value} (choix : {', '.join(DEBUG_LEVELS)} ou un entier)")
+
+
 def die(msg):
     log.error(msg)
     sys.exit(1)
@@ -105,9 +118,11 @@ def run_step(step):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Chaine de compilation et de test.")
     # Argument facultatif : s'il n'est pas fourni, il vaut DEFAULT_DEBUG_LEVEL
-    parser.add_argument("--debug_level", type=str.upper, choices=DEBUG_LEVELS,
-                        default=DEFAULT_DEBUG_LEVEL,
-                        help="Niveau de log (defaut : %(default)s)")
+    parser.add_argument("--debug_level", type=debug_level, default=DEFAULT_DEBUG_LEVEL,
+                        metavar="NIVEAU",
+                        help="Niveau de log : NOTSET (0), DEBUG (10), INFO (20), "
+                             "WARNING (30), ERROR (40), CRITICAL (50), par nom ou "
+                             "valeur numerique (defaut : %(default)s)")
     parser.add_argument("steps", nargs="*", choices=ALL_STEPS, metavar="etape",
                         help=f"Etapes a executer parmi {ALL_STEPS} "
                              "(defaut : toutes, dans l'ordre)")
@@ -118,11 +133,11 @@ def main(argv=None):
     args = parse_args(argv)
 
     logging.basicConfig(
-        level=getattr(logging, args.debug_level),
+        level=args.debug_level,
         format="[%(asctime)s] %(levelname)-7s %(message)s",
         datefmt="%H:%M:%S",
     )
-    log.debug("Niveau de debug : %s", args.debug_level)
+    log.debug("Niveau de debug : %s", logging.getLevelName(args.debug_level))
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 

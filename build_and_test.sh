@@ -8,6 +8,7 @@
 #   ./build_and_test.sh              # execute toutes les etapes
 #   ./build_and_test.sh clean build  # execute seulement les etapes listees
 #   ./build_and_test.sh --debug_level DEBUG build  # niveau de log (defaut : INFO)
+#   ./build_and_test.sh --debug_level 10 build     # idem, en valeur numerique
 #   ./build_and_test.sh -h           # affiche l'aide
 #
 
@@ -23,20 +24,33 @@ mkdir -p "$LOG_DIR"
 LOG_DIR="$(cd "$LOG_DIR" && pwd)"
 JOBS="${JOBS:-$(nproc 2>/dev/null || echo 1)}"
 DEFAULT_DEBUG_LEVEL="INFO"
-DEBUG_LEVEL="$DEFAULT_DEBUG_LEVEL"
 
 ALL_STEPS=(clean configure build test)
 
 # ---------------------------------------------------------------------------
 # Utilitaires
 # ---------------------------------------------------------------------------
-# Niveaux de log (meme ordre que le module logging de Python)
-declare -A LEVELS=([DEBUG]=10 [INFO]=20 [WARNING]=30 [ERROR]=40 [CRITICAL]=50)
+# Niveaux de log : memes noms et valeurs numeriques que le module logging
+# de Python (NOTSET=0 : tous les messages sont affiches)
+declare -A LEVELS=([NOTSET]=0 [DEBUG]=10 [INFO]=20 [WARNING]=30 [ERROR]=40 [CRITICAL]=50)
+DEBUG_LEVEL=${LEVELS[$DEFAULT_DEBUG_LEVEL]}   # seuil numerique courant
 
-# log NIVEAU message... : affiche seulement si NIVEAU >= DEBUG_LEVEL
+# set_debug_level NOM|NOMBRE : fixe le seuil (ex. INFO, info ou 20)
+set_debug_level() {
+    local value="${1^^}"
+    if [[ "$value" =~ ^[0-9]+$ ]]; then
+        DEBUG_LEVEL=$((10#$value))
+    elif [[ -n "${LEVELS[$value]:-}" ]]; then
+        DEBUG_LEVEL=${LEVELS[$value]}
+    else
+        die "Niveau de debug invalide : $1 (choix : NOTSET DEBUG INFO WARNING ERROR CRITICAL ou un entier)"
+    fi
+}
+
+# log NIVEAU message... : affiche seulement si NIVEAU >= seuil DEBUG_LEVEL
 log() {
     local level="$1"; shift
-    (( ${LEVELS[$level]} >= ${LEVELS[$DEBUG_LEVEL]} )) || return 0
+    (( ${LEVELS[$level]} >= DEBUG_LEVEL )) || return 0
     printf '[%s] %-7s %s\n' "$(date '+%H:%M:%S')" "$level" "$*"
 }
 debug() { log DEBUG "$@"; }
@@ -57,7 +71,8 @@ Etapes disponibles : ${ALL_STEPS[*]}
 Sans etape, toutes les etapes sont executees dans l'ordre.
 
 Options :
-  --debug_level NIVEAU  DEBUG, INFO, WARNING, ERROR ou CRITICAL
+  --debug_level NIVEAU  NOTSET (0), DEBUG (10), INFO (20), WARNING (30),
+                        ERROR (40), CRITICAL (50), par nom ou valeur numerique
                         (facultatif, defaut : $DEFAULT_DEBUG_LEVEL)
   -h, --help            Affiche cette aide
 
@@ -133,19 +148,14 @@ main() {
             -h|--help) usage; exit 0 ;;
             --debug_level)
                 [[ $# -ge 2 ]] || die "L'option $1 attend une valeur"
-                DEBUG_LEVEL="${2^^}"; shift 2 ;;
-            --debug_level=*) DEBUG_LEVEL="${1#*=}"; DEBUG_LEVEL="${DEBUG_LEVEL^^}"; shift ;;
+                set_debug_level "$2"; shift 2 ;;
+            --debug_level=*) set_debug_level "${1#*=}"; shift ;;
             clean|configure|build|test) steps+=("$1"); shift ;;
             *) usage; die "Argument inconnu : $1" ;;
         esac
     done
 
     # Niveau non fourni -> reste a la valeur par defaut (INFO)
-    if [[ -z "${LEVELS[$DEBUG_LEVEL]:-}" ]]; then
-        local bad="$DEBUG_LEVEL"
-        DEBUG_LEVEL="$DEFAULT_DEBUG_LEVEL"
-        die "Niveau de debug invalide : $bad (choix : ${!LEVELS[*]})"
-    fi
     debug "Niveau de debug : $DEBUG_LEVEL"
 
     [[ ${#steps[@]} -eq 0 ]] && steps=("${ALL_STEPS[@]}")
