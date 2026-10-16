@@ -7,7 +7,7 @@
 # Usage :
 #   ./build_and_test.sh              # execute toutes les etapes
 #   ./build_and_test.sh clean build  # execute seulement les etapes listees
-#   ./build_and_test.sh -j 4 build   # option facultative (defaut : nb de CPU)
+#   ./build_and_test.sh --debug_level DEBUG build  # niveau de log (defaut : INFO)
 #   ./build_and_test.sh -h           # affiche l'aide
 #
 
@@ -17,20 +17,32 @@ set -Eeuo pipefail
 # Configuration (a adapter)
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Valeurs par defaut, utilisees si l'option correspondante n'est pas passee
-# (priorite : option en ligne de commande > variable d'environnement > defaut)
-DEFAULT_PROJECT_DIR="${PROJECT_DIR:-$SCRIPT_DIR}"
-DEFAULT_JOBS="${JOBS:-$(nproc 2>/dev/null || echo 1)}"
+PROJECT_DIR="$(cd "${PROJECT_DIR:-$SCRIPT_DIR}" && pwd)"
+LOG_DIR="${LOG_DIR:-$PROJECT_DIR/logs}"
+mkdir -p "$LOG_DIR"
+LOG_DIR="$(cd "$LOG_DIR" && pwd)"
+JOBS="${JOBS:-$(nproc 2>/dev/null || echo 1)}"
+DEFAULT_DEBUG_LEVEL="INFO"
+DEBUG_LEVEL="$DEFAULT_DEBUG_LEVEL"
 
 ALL_STEPS=(clean configure build test)
 
 # ---------------------------------------------------------------------------
 # Utilitaires
 # ---------------------------------------------------------------------------
-log()   { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
-info()  { log "INFO  $*"; }
-error() { log "ERROR $*" >&2; }
+# Niveaux de log (meme ordre que le module logging de Python)
+declare -A LEVELS=([DEBUG]=10 [INFO]=20 [WARNING]=30 [ERROR]=40 [CRITICAL]=50)
+
+# log NIVEAU message... : affiche seulement si NIVEAU >= DEBUG_LEVEL
+log() {
+    local level="$1"; shift
+    (( ${LEVELS[$level]} >= ${LEVELS[$DEBUG_LEVEL]} )) || return 0
+    printf '[%s] %-7s %s\n' "$(date '+%H:%M:%S')" "$level" "$*"
+}
+debug() { log DEBUG "$@"; }
+info()  { log INFO "$@"; }
+warn()  { log WARNING "$@" >&2; }
+error() { log ERROR "$@" >&2; }
 
 die() {
     error "$*"
@@ -39,15 +51,15 @@ die() {
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") [options] [etape ...]
+Usage: $(basename "$0") [--debug_level NIVEAU] [etape ...]
 
 Etapes disponibles : ${ALL_STEPS[*]}
 Sans etape, toutes les etapes sont executees dans l'ordre.
 
-Options (facultatives) :
-  -p, --project-dir DIR  Repertoire du projet (defaut : $DEFAULT_PROJECT_DIR)
-  -j, --jobs N           Nombre de jobs make  (defaut : $DEFAULT_JOBS)
-  -h, --help             Affiche cette aide
+Options :
+  --debug_level NIVEAU  DEBUG, INFO, WARNING, ERROR ou CRITICAL
+                        (facultatif, defaut : $DEFAULT_DEBUG_LEVEL)
+  -h, --help            Affiche cette aide
 
 Variables d'environnement :
   PROJECT_DIR  Repertoire du projet (defaut : $SCRIPT_DIR)
@@ -115,35 +127,26 @@ step_test() {
 # ---------------------------------------------------------------------------
 main() {
     local steps=()
-    local project_dir="" jobs=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -h|--help) usage; exit 0 ;;
-            -p|--project-dir)
+            --debug_level)
                 [[ $# -ge 2 ]] || die "L'option $1 attend une valeur"
-                project_dir="$2"; shift 2 ;;
-            --project-dir=*) project_dir="${1#*=}"; shift ;;
-            -j|--jobs)
-                [[ $# -ge 2 ]] || die "L'option $1 attend une valeur"
-                jobs="$2"; shift 2 ;;
-            --jobs=*) jobs="${1#*=}"; shift ;;
+                DEBUG_LEVEL="${2^^}"; shift 2 ;;
+            --debug_level=*) DEBUG_LEVEL="${1#*=}"; DEBUG_LEVEL="${DEBUG_LEVEL^^}"; shift ;;
             clean|configure|build|test) steps+=("$1"); shift ;;
             *) usage; die "Argument inconnu : $1" ;;
         esac
     done
 
-    # Argument non fourni -> valeur par defaut
-    PROJECT_DIR="$(cd "${project_dir:-$DEFAULT_PROJECT_DIR}" && pwd)" \
-        || die "Repertoire projet introuvable : ${project_dir:-$DEFAULT_PROJECT_DIR}"
-    JOBS="${jobs:-$DEFAULT_JOBS}"
-    [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "Nombre de jobs invalide : $JOBS"
-
-    LOG_DIR="${LOG_DIR:-$PROJECT_DIR/logs}"
-    mkdir -p "$LOG_DIR"
-    LOG_DIR="$(cd "$LOG_DIR" && pwd)"
-
-    info "Projet : $PROJECT_DIR | Jobs : $JOBS | Logs : $LOG_DIR"
+    # Niveau non fourni -> reste a la valeur par defaut (INFO)
+    if [[ -z "${LEVELS[$DEBUG_LEVEL]:-}" ]]; then
+        local bad="$DEBUG_LEVEL"
+        DEBUG_LEVEL="$DEFAULT_DEBUG_LEVEL"
+        die "Niveau de debug invalide : $bad (choix : ${!LEVELS[*]})"
+    fi
+    debug "Niveau de debug : $DEBUG_LEVEL"
 
     [[ ${#steps[@]} -eq 0 ]] && steps=("${ALL_STEPS[@]}")
 
