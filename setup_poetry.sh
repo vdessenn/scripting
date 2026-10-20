@@ -6,8 +6,9 @@
 #
 #   pkginfo      Corrige pkginfo pour lire les metadonnees 2.4 (voir step_pkginfo)
 #   init         Cree le pyproject.toml (ensemble de dependances, pas un paquet)
-#   config       virtualenvs.in-project, certificat Artifactory et ancien
-#                installeur, en global (~/.config/pypoetry) et en local (poetry.toml)
+#   config       virtualenvs.in-project et ancien installeur, en global
+#                (~/.config/pypoetry) et en local (poetry.toml) ; certificat
+#                Artifactory en global uniquement (auth.toml)
 #   source       Source Artifactory unique par defaut ([[tool.poetry.source]])
 #   credentials  Utilisateur + jeton Artifactory (JFrog CLI ou navigateur),
 #                stockes en clair dans ~/.config/pypoetry/auth.toml
@@ -41,7 +42,10 @@ PYTHON_CONSTRAINT="${PYTHON_CONSTRAINT:->=3.6.8,<3.7}"
 
 # Versions epinglees : Poetry 1.1 choisit sinon la derniere version publiee,
 # meme si elle ne supporte plus Python 3.6
-PYQT5_DEPS=(PyQt5==5.15.6 PyQt5-Qt5==5.15.2) # PyQt5-Qt5 > 5.15.2 : pas de wheel Linux
+# Poetry 1.1 ne lit pas les dependances de PyQt5 depuis une source "legacy"
+# (Artifactory) : PyQt5-Qt5 et PyQt5-sip doivent etre listes explicitement.
+# PyQt5-Qt5 > 5.15.2 : pas de wheel Linux ; PyQt5-sip > 12.9.1 : Python >= 3.7
+PYQT5_DEPS=(PyQt5==5.15.6 PyQt5-Qt5==5.15.2 PyQt5-sip==12.9.1)
 DATACLASSES_DEP="dataclasses==0.8"
 DEV_TOOLS=(
     pytest==7.0.1
@@ -273,8 +277,9 @@ step_config() {
 
     resolve_cert
     if [[ -n "$ARTIFACTORY_CERT" ]]; then
-        info "certificates.$SOURCE_NAME.cert = $ARTIFACTORY_CERT"
-        poetry_config "certificates.$SOURCE_NAME.cert" "$ARTIFACTORY_CERT"
+        # Poetry 1.1 ecrit certificates.* dans auth.toml, meme avec --local
+        info "certificates.$SOURCE_NAME.cert = $ARTIFACTORY_CERT (global, auth.toml)"
+        poetry config "certificates.$SOURCE_NAME.cert" "$ARTIFACTORY_CERT"
     fi
 
     if ! grep -qsxE '/?\.venv/?' .gitignore; then
