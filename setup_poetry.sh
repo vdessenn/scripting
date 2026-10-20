@@ -1,53 +1,63 @@
 #!/usr/bin/env bash
 #
-# setup_poetry.sh - Mise en place de Poetry sur un projet existant
+# setup_poetry.sh - Mise en place de Poetry (1.1.x, Python 3.6) sur un depot existant
 #
-# Etapes : init -> config -> source -> credentials -> deps -> devtools -> install
+# Etapes : pkginfo -> init -> config -> source -> credentials -> deps -> devtools -> install
 #
-#   init         Cree le pyproject.toml (poetry init) s'il n'existe pas encore
-#   config       virtualenvs.in-project = true (poetry.toml), certificat
-#                Artifactory non verifie, nouvel installeur desactive
-#   source       Ajoute la source Artifactory ([[tool.poetry.source]])
-#   credentials  Identifiants Artifactory (JFrog CLI ou navigateur + saisie)
-#   deps         Propose PyQt5 (+ LD_LIBRARY_PATH) et dataclasses (Python 3.6)
-#   devtools     Outils de dev (pre-commit, ...) dans le groupe dev
+#   pkginfo      Corrige pkginfo pour lire les metadonnees 2.4 (voir step_pkginfo)
+#   init         Cree le pyproject.toml (ensemble de dependances, pas un paquet)
+#   config       virtualenvs.in-project, certificat Artifactory et ancien
+#                installeur, en global (~/.config/pypoetry) et en local (poetry.toml)
+#   source       Source Artifactory unique par defaut ([[tool.poetry.source]])
+#   credentials  Utilisateur + jeton Artifactory (JFrog CLI ou navigateur),
+#                stockes en clair dans ~/.config/pypoetry/auth.toml
+#   deps         Propose PyQt5 (+ LD_LIBRARY_PATH dans .venv/bin/activate)
+#                et dataclasses (backport Python 3.6)
+#   devtools     Outils de dev (pytest, black, ...) et pre-commit
 #   install      poetry install --no-root
 #
 # Usage :
-#   ./setup_poetry.sh                    # execute toutes les etapes
-#   ./setup_poetry.sh source credentials # execute seulement les etapes listees
-#   ./setup_poetry.sh -y                 # mode non interactif (valeurs par defaut)
-#   ./setup_poetry.sh -h                 # affiche l'aide
+#   ./setup_poetry.sh                     # execute toutes les etapes
+#   ./setup_poetry.sh source credentials  # execute seulement les etapes listees
+#   ./setup_poetry.sh -d chemin/projet    # projet ailleurs qu'a la racine du depot
+#   ./setup_poetry.sh -h                  # affiche l'aide
 #
 
 set -Eeuo pipefail
 
 # ---------------------------------------------------------------------------
-# Configuration (a adapter ou a surcharger par variables d'environnement)
+# Configuration (a adapter)
 # ---------------------------------------------------------------------------
-PROJECT_DIR="$(cd "${PROJECT_DIR:-$PWD}" && pwd)"
-
 ARTIFACTORY_URL="${ARTIFACTORY_URL:-https://artifactory.example.com}"
 ARTIFACTORY_REPO="${ARTIFACTORY_REPO:-pypi-remote}"
 SOURCE_NAME="${SOURCE_NAME:-artifactory}"
-SOURCE_URL="${SOURCE_URL:-}"            # defaut : deduit de l'URL et du depot
-ARTIFACTORY_USER="${ARTIFACTORY_USER:-}"
-ARTIFACTORY_TOKEN="${ARTIFACTORY_TOKEN:-}"
+SOURCE_URL="${SOURCE_URL:-$ARTIFACTORY_URL/artifactory/api/pypi/$ARTIFACTORY_REPO/simple}"
 JF_SERVER_ID="${JF_SERVER_ID:-$SOURCE_NAME}"
 
-PYTHON_BIN="${PYTHON_BIN:-}"            # interpreteur du virtualenv (ex : python3.6)
-PYTHON_CONSTRAINT="${PYTHON_CONSTRAINT:-}"
-CERT_VERIFY="${CERT_VERIFY:-false}"     # certificates.<source>.cert
-NEW_INSTALLER="${NEW_INSTALLER:-false}" # Poetry < 2.0 uniquement
+# certificates.<source>.cert : "false" (Poetry >= 1.2) ou chemin d'un bundle CA
+ARTIFACTORY_CERT="${ARTIFACTORY_CERT:-false}"
 
-INSTALL_PYQT5="${INSTALL_PYQT5:-}"      # yes / no (vide : question)
-INSTALL_DATACLASSES="${INSTALL_DATACLASSES:-}"
-PYQT5_QT5_VERSION="${PYQT5_QT5_VERSION:-5.15.2}" # derniere version avec wheels Linux
-DEV_TOOLS="${DEV_TOOLS:-pre-commit}"
+PYTHON_CONSTRAINT="${PYTHON_CONSTRAINT:->=3.6.8,<3.7}"
 
-ASSUME_YES="${ASSUME_YES:-0}"
+# Versions epinglees : Poetry 1.1 choisit sinon la derniere version publiee,
+# meme si elle ne supporte plus Python 3.6
+PYQT5_DEPS=(PyQt5==5.15.6 PyQt5-Qt5==5.15.2) # PyQt5-Qt5 > 5.15.2 : pas de wheel Linux
+DATACLASSES_DEP="dataclasses==0.8"
+DEV_TOOLS=(
+    pytest==7.0.1
+    pytest-cov==4.0.0
+    coverage==6.2
+    black==22.8.0
+    isort==5.10.1
+    pylint==2.13.9
+    mypy==0.971
+    pre-commit==2.17.0
+    pre-commit-hooks==4.1.0
+)
 
-ALL_STEPS=(init config source credentials deps devtools install)
+POETRY_CONFIG_DIR="${POETRY_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/pypoetry}"
+
+ALL_STEPS=(pkginfo init config source credentials deps devtools install)
 
 # ---------------------------------------------------------------------------
 # Utilitaires
@@ -64,32 +74,17 @@ die() {
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") [-y] [etape ...]
+Usage: $(basename "$0") [-d repertoire] [etape ...]
 
 Etapes disponibles : ${ALL_STEPS[*]}
 Sans argument, toutes les etapes sont executees dans l'ordre.
 
 Options :
-  -y, --yes    Mode non interactif : les questions prennent leur valeur par defaut
-  -h, --help   Affiche cette aide
+  -d, --project-dir DIR  Repertoire du projet Python (defaut : racine du depot git)
+  -h, --help             Affiche cette aide
 
-Variables d'environnement :
-  PROJECT_DIR          Repertoire du projet Python    (defaut : repertoire courant)
-  ARTIFACTORY_URL      URL de la plateforme JFrog     (defaut : $ARTIFACTORY_URL)
-  ARTIFACTORY_REPO     Depot PyPI Artifactory         (defaut : $ARTIFACTORY_REPO)
-  SOURCE_NAME          Nom de la source Poetry        (defaut : $SOURCE_NAME)
-  SOURCE_URL           URL complete de l'index        (defaut : deduite)
-  ARTIFACTORY_USER     Identifiant Artifactory        (defaut : question)
-  ARTIFACTORY_TOKEN    Cle API / jeton Artifactory    (defaut : question)
-  JF_SERVER_ID         Server ID JFrog CLI            (defaut : \$SOURCE_NAME)
-  PYTHON_BIN           Interpreteur du virtualenv     (defaut : celui de Poetry)
-  PYTHON_CONSTRAINT    Contrainte Python du projet    (defaut : >=X.Y detecte)
-  CERT_VERIFY          Verification du certificat     (defaut : $CERT_VERIFY)
-  NEW_INSTALLER        Nouvel installeur Poetry < 2.0 (defaut : $NEW_INSTALLER)
-  INSTALL_PYQT5        yes/no                         (defaut : question)
-  INSTALL_DATACLASSES  yes/no                         (defaut : question)
-  PYQT5_QT5_VERSION    Version epinglee de PyQt5-Qt5  (defaut : $PYQT5_QT5_VERSION)
-  DEV_TOOLS            Outils du groupe dev           (defaut : $DEV_TOOLS)
+Source Artifactory : $SOURCE_URL
+(a modifier en tete de script ou via ARTIFACTORY_URL / ARTIFACTORY_REPO)
 EOF
 }
 
@@ -98,23 +93,16 @@ on_error() {
 }
 trap 'on_error $LINENO $?' ERR
 
-is_interactive() {
-    [[ "$ASSUME_YES" != 1 && -t 0 ]]
-}
-
-# ask <variable> <question> [defaut] : lit une valeur, garde le defaut sinon
+# ask <variable> <question> [defaut] : lit une valeur, garde le defaut si vide
 ask() {
     local __var="$1" question="$2" default="${3:-}" answer=""
-    if is_interactive; then
-        read -r -p "$question${default:+ [$default]} : " answer || true
-    fi
+    read -r -p "$question${default:+ [$default]} : " answer || true
     printf -v "$__var" '%s' "${answer:-$default}"
 }
 
 # ask_secret <variable> <question> : saisie masquee
 ask_secret() {
     local __var="$1" question="$2" answer=""
-    is_interactive || die "Saisie de '$question' impossible en mode non interactif"
     read -r -s -p "$question : " answer || true
     echo
     printf -v "$__var" '%s' "$answer"
@@ -122,33 +110,17 @@ ask_secret() {
 
 # confirm <question> [y|n] : retourne 0 si oui
 confirm() {
-    local question="$1" default="${2:-n}" answer=""
-    if is_interactive; then
-        local hint="[y/N]"
-        [[ "$default" == y ]] && hint="[Y/n]"
-        read -r -p "$question $hint " answer || true
-    fi
-    answer="${answer:-$default}"
-    [[ "$answer" =~ ^[yYoO] ]]
-}
-
-# yes_no <valeur> <question> <defaut> : valeur imposee (yes/no) ou question
-yes_no() {
-    case "${1,,}" in
-        y|yes|o|oui|1|true) return 0 ;;
-        n|no|non|0|false)   return 1 ;;
-        *) confirm "$2" "$3" ;;
-    esac
+    local question="$1" default="${2:-n}" answer="" hint="[y/N]"
+    [[ "$default" == y ]] && hint="[Y/n]"
+    read -r -p "$question $hint " answer || true
+    [[ "${answer:-$default}" =~ ^[yYoO] ]]
 }
 
 open_url() {
-    local url="$1" opener=""
-    info "Ouvrir : $url"
-    for cmd in xdg-open open wslview; do
-        command -v "$cmd" >/dev/null 2>&1 && { opener="$cmd"; break; }
-    done
-    if [[ -n "$opener" ]] && is_interactive && confirm "Ouvrir dans le navigateur ?" y; then
-        "$opener" "$url" >/dev/null 2>&1 &
+    local url="$1"
+    info "-> $url"
+    if command -v xdg-open >/dev/null 2>&1 && confirm "Ouvrir dans le navigateur ?" y; then
+        xdg-open "$url" >/dev/null 2>&1 &
     fi
 }
 
@@ -157,25 +129,24 @@ version_ge() {
     [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" == "$2" ]]
 }
 
-poetry_version() {
-    poetry --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+)+' | head -n1
-}
-
-has_pyproject() {
-    [[ -f "$PROJECT_DIR/pyproject.toml" ]]
+# poetry_config <args...> : applique un reglage en global puis en local
+poetry_config() {
+    poetry config "$@"
+    poetry config --local "$@"
 }
 
 require_pyproject() {
-    has_pyproject || die "Pas de pyproject.toml dans $PROJECT_DIR (lancer l'etape init)"
+    [[ -f "$PROJECT_DIR/pyproject.toml" ]] \
+        || die "Pas de pyproject.toml dans $PROJECT_DIR (lancer l'etape init)"
 }
 
-# Groupe dev : --group dev (Poetry >= 1.2) ou --dev (Poetry 1.1)
-dev_group_args() {
-    if version_ge "$POETRY_VERSION" 1.2; then
-        echo "--group dev"
-    else
-        echo "--dev"
-    fi
+# toml_has_section <section> : la section existe-t-elle dans pyproject.toml ?
+toml_has_section() {
+    grep -qF "[$1]" "$PROJECT_DIR/pyproject.toml"
+}
+
+has_dependency() {
+    grep -qiE "^\"?$1\"? *=" "$PROJECT_DIR/pyproject.toml"
 }
 
 run_step() {
@@ -190,60 +161,120 @@ run_step() {
 # Etapes
 # ---------------------------------------------------------------------------
 step_init() {
-    if has_pyproject; then
-        info "pyproject.toml deja present, initialisation ignoree"
+    if [[ -f pyproject.toml ]] && toml_has_section tool.poetry; then
+        info "pyproject.toml avec une section [tool.poetry] deja present, ignore"
+        return
+    fi
+    [[ -f pyproject.toml ]] && warn "pyproject.toml sans section Poetry : poetry init le completera"
+
+    local name version description author python
+    local git_author
+    git_author="$(git config user.name 2>/dev/null || true)"
+    [[ -n "$git_author" ]] && git_author="$git_author <$(git config user.email 2>/dev/null || true)>"
+
+    ask name "Nom du projet" "$(basename "$PROJECT_DIR" | tr '[:upper:]_ ' '[:lower:]--')"
+    ask version "Version" "0.1.0"
+    ask description "Description" ""
+    ask author "Auteur" "$git_author"
+    ask python "Contrainte de version Python" "$PYTHON_CONSTRAINT"
+
+    info "Initialisation du projet '$name' (python $python)"
+    local args=(--no-interaction --name "$name" --description "$description" --python "$python")
+    [[ -n "$author" ]] && args+=(--author "$author")
+    poetry init "${args[@]}"
+    poetry version "$version"
+}
+
+# Fichier pkginfo/distribution.py charge par Poetry (vendorise ou dans son interpreteur)
+find_pkginfo() {
+    local poetry_bin shebang interp candidate
+    poetry_bin="$(readlink -f "$(command -v poetry)")"
+
+    # Installation get-poetry.py : dependances vendorisees dans ~/.poetry/lib
+    for candidate in "$(dirname "$poetry_bin")"/../lib/poetry/_vendor/py3*/pkginfo/distribution.py; do
+        [[ -f "$candidate" ]] && { realpath "$candidate"; return; }
+    done
+
+    # Installation pip / install-poetry.py : pkginfo de l'interpreteur de Poetry
+    shebang="$(head -n1 "$poetry_bin")"
+    read -r -a interp <<< "${shebang#\#!}"
+    "${interp[@]}" -c 'import pkginfo.distribution as d; print(d.__file__)' 2>/dev/null
+}
+
+# pkginfo 1.10 (dernier compatible Python 3.6) ignore les metadonnees 2.4 :
+# Poetry 1.1 ne voit alors pas le Requires-Python des paquets recents et
+# choisit des versions incompatibles avec Python 3.6
+step_pkginfo() {
+    local file
+    file="$(find_pkginfo)"
+    [[ -n "$file" && -f "$file" ]] || { warn "pkginfo de Poetry introuvable, etape ignoree"; return; }
+
+    if ! grep -q "^ *'2\.3': HEADER_ATTRS_2_3," "$file"; then
+        info "$file ne necessite pas de correctif"
+        return
+    fi
+    if grep -q "^ *'2\.4':" "$file"; then
+        info "pkginfo deja corrige ($file)"
         return
     fi
 
-    local name default_python python_constraint
-    name="$(basename "$PROJECT_DIR" | tr '[:upper:]_ ' '[:lower:]--')"
-    default_python="$("${PYTHON_BIN:-python3}" -c 'import sys; print(">=%d.%d" % sys.version_info[:2])')"
+    warn "pkginfo ne lit pas les metadonnees 2.4 : Poetry peut choisir des versions"
+    warn "incompatibles avec Python 3.6 (ex : attrs 26.1.0 qui requiert Python >= 3.9)"
+    confirm "Corriger $file (sauvegarde en .orig) ?" y || return 0
 
-    ask name "Nom du projet" "$name"
-    ask python_constraint "Contrainte de version Python" "${PYTHON_CONSTRAINT:-$default_python}"
-    PYTHON_CONSTRAINT="$python_constraint"
+    local sudo=""
+    [[ -w "$file" ]] || sudo="sudo"
+    $sudo cp -n "$file" "$file.orig"
+    $sudo sed -i "s/^\( *\)'2\.3': HEADER_ATTRS_2_3,$/&\n\1'2.4': HEADER_ATTRS_2_3,/" "$file"
+    info "Correctif applique"
 
-    info "Initialisation du projet '$name' (python $PYTHON_CONSTRAINT)"
-    poetry init --no-interaction --name "$name" --python "$PYTHON_CONSTRAINT"
+    # Les metadonnees deja en cache ont ete lues sans Requires-Python
+    local cache_dir
+    cache_dir="$(poetry config cache-dir | tr -d '"')"
+    if [[ -d "$cache_dir/cache/repositories/$SOURCE_NAME" ]]; then
+        info "Purge du cache Poetry de la source '$SOURCE_NAME'"
+        rm -rf "${cache_dir:?}/cache/repositories/$SOURCE_NAME"
+    fi
+}
 
-    # Le depot n'est pas forcement un paquet Python : pas d'installation du projet lui-meme
-    if version_ge "$POETRY_VERSION" 1.8 && ! grep -q '^package-mode' pyproject.toml; then
-        if grep -q '^\[tool\.poetry\]' pyproject.toml; then
-            sed -i '/^\[tool\.poetry\]/a package-mode = false' pyproject.toml
-        else
-            printf '\n[tool.poetry]\npackage-mode = false\n' >> pyproject.toml
-        fi
+# Chemin du certificat : Poetry 1.1 ne sait pas desactiver la verification
+resolve_cert() {
+    if [[ "$ARTIFACTORY_CERT" != false ]] || version_ge "$POETRY_VERSION" 1.2; then
+        return
+    fi
+
+    warn "Poetry $POETRY_VERSION ne supporte pas 'certificates.$SOURCE_NAME.cert false' (Poetry >= 1.2)"
+    warn "Il faut indiquer le bundle CA qui valide le certificat d'Artifactory"
+
+    local default="" candidate
+    for candidate in /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt; do
+        [[ -f "$candidate" ]] && { default="$candidate"; break; }
+    done
+    ask ARTIFACTORY_CERT "Chemin du bundle CA (vide pour ne rien configurer)" "$default"
+
+    if [[ -n "$ARTIFACTORY_CERT" && ! -f "$ARTIFACTORY_CERT" ]]; then
+        die "Fichier introuvable : $ARTIFACTORY_CERT"
     fi
 }
 
 step_config() {
     require_pyproject
 
-    info "virtualenvs.in-project = true (poetry.toml)"
-    poetry config --local virtualenvs.in-project true
+    info "virtualenvs.in-project = true"
+    poetry_config virtualenvs.in-project true
 
-    info "certificates.$SOURCE_NAME.cert = $CERT_VERIFY"
-    poetry config "certificates.$SOURCE_NAME.cert" "$CERT_VERIFY"
+    info "experimental.new-installer = false"
+    poetry_config experimental.new-installer false
 
-    if version_ge "$POETRY_VERSION" 2.0; then
-        info "Poetry $POETRY_VERSION : plus d'option pour l'ancien installeur, ignore"
-    elif version_ge "$POETRY_VERSION" 1.4; then
-        info "installer.modern-installation = $NEW_INSTALLER"
-        poetry config installer.modern-installation "$NEW_INSTALLER"
-    else
-        info "experimental.new-installer = $NEW_INSTALLER"
-        poetry config experimental.new-installer "$NEW_INSTALLER"
+    resolve_cert
+    if [[ -n "$ARTIFACTORY_CERT" ]]; then
+        info "certificates.$SOURCE_NAME.cert = $ARTIFACTORY_CERT"
+        poetry_config "certificates.$SOURCE_NAME.cert" "$ARTIFACTORY_CERT"
     fi
 
-    if [[ -n "$PYTHON_BIN" ]]; then
-        info "Virtualenv base sur $PYTHON_BIN"
-        poetry env use "$PYTHON_BIN"
-    fi
-
-    local gitignore="$PROJECT_DIR/.gitignore"
-    if ! grep -qsxE '/?\.venv/?' "$gitignore"; then
-        info "Ajout de .venv/ a $gitignore"
-        echo ".venv/" >> "$gitignore"
+    if ! grep -qsxE '/?\.venv/?' .gitignore; then
+        info "Ajout de .venv/ a .gitignore"
+        echo ".venv/" >> .gitignore
     fi
 }
 
@@ -252,103 +283,95 @@ step_source() {
 
     if grep -qE "^name = \"$SOURCE_NAME\"" pyproject.toml; then
         info "Source '$SOURCE_NAME' deja definie dans pyproject.toml"
+        grep -qF "url = \"$SOURCE_URL\"" pyproject.toml \
+            || warn "Son URL differe de $SOURCE_URL, a verifier dans pyproject.toml"
         return
     fi
 
-    info "Ajout de la source '$SOURCE_NAME' : $SOURCE_URL"
-    if version_ge "$POETRY_VERSION" 1.5; then
-        poetry source add --priority=primary "$SOURCE_NAME" "$SOURCE_URL"
-    elif version_ge "$POETRY_VERSION" 1.2; then
-        poetry source add --default "$SOURCE_NAME" "$SOURCE_URL"
-    else
-        # Poetry 1.1 : pas de commande 'source', ecriture directe
-        cat >> pyproject.toml <<EOF
+    # Poetry 1.1 n'a pas de commande 'poetry source add'
+    info "Ajout de la source '$SOURCE_NAME' par defaut (remplace PyPI) : $SOURCE_URL"
+    cat >> pyproject.toml <<EOF
 
 [[tool.poetry.source]]
 name = "$SOURCE_NAME"
 url = "$SOURCE_URL"
 default = true
 EOF
-    fi
 }
 
-# Recupere un jeton via la JFrog CLI (configuration du serveur si besoin)
+# Jeton via la JFrog CLI (configuration du serveur au besoin)
 credentials_via_jf() {
     if ! jf config show "$JF_SERVER_ID" >/dev/null 2>&1; then
         info "Configuration du serveur JFrog '$JF_SERVER_ID' (choisir 'Web Login' si propose)"
-        jf config add "$JF_SERVER_ID" --url="$ARTIFACTORY_URL" --interactive=true
+        jf config add "$JF_SERVER_ID" --url="$ARTIFACTORY_URL" --interactive=true || return 1
     fi
 
-    info "Creation d'un jeton d'acces Artifactory via la JFrog CLI"
+    info "Creation d'un jeton d'acces via la JFrog CLI"
     local json
     json="$(jf access-token-create --server-id="$JF_SERVER_ID")" || return 1
-    ARTIFACTORY_TOKEN="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["access_token"])' <<< "$json")" || return 1
+    ARTIFACTORY_TOKEN="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["access_token"])' <<< "$json")"
 }
 
-# Renvoie vers l'interface web pour se connecter et recuperer la cle API
+# Renvoie vers l'interface web pour se connecter et recuperer le jeton
 credentials_via_browser() {
-    info "1. Se connecter a Artifactory"
+    info "1. Se connecter a Artifactory :"
     open_url "$ARTIFACTORY_URL/ui/login/"
-    info "2. Recuperer la cle API / generer un Identity Token (Edit Profile)"
+    info "2. Generer un jeton (Edit Profile > Generate an Identity Token) :"
     open_url "$ARTIFACTORY_URL/ui/user_profile"
     info "   ou via 'Set Me Up' du depot $ARTIFACTORY_REPO :"
     info "   $ARTIFACTORY_URL/ui/repos/tree/General/$ARTIFACTORY_REPO"
-    ask_secret ARTIFACTORY_TOKEN "Cle API / jeton Artifactory"
+    ask_secret ARTIFACTORY_TOKEN "Jeton Artifactory"
 }
 
 step_credentials() {
-    local curl_opts=(-fsS -o /dev/null)
-    [[ "$CERT_VERIFY" == false ]] && curl_opts+=(-k)
-
-    if [[ -z "$ARTIFACTORY_TOKEN" ]]; then
-        if ! is_interactive; then
-            warn "ARTIFACTORY_TOKEN non defini en mode non interactif, etape ignoree"
-            return
-        fi
-        if ! confirm "Configurer les identifiants Artifactory pour '$SOURCE_NAME' ?" y; then
-            return
-        fi
+    local auth_file="$POETRY_CONFIG_DIR/auth.toml"
+    if grep -qsF "[http-basic.$SOURCE_NAME]" "$auth_file" \
+        && ! confirm "Identifiants '$SOURCE_NAME' deja presents dans $auth_file, les remplacer ?" n; then
+        return
     fi
 
-    [[ -n "$ARTIFACTORY_USER" ]] || ask ARTIFACTORY_USER "Identifiant Artifactory" "${USER:-}"
+    local user
+    ask user "Utilisateur Artifactory" "${USER:-}"
 
-    if [[ -z "$ARTIFACTORY_TOKEN" ]]; then
-        if command -v jf >/dev/null 2>&1 && confirm "JFrog CLI detectee, l'utiliser pour generer un jeton ?" y; then
-            credentials_via_jf || warn "Echec de la JFrog CLI, passage par le navigateur"
-        fi
-        [[ -n "$ARTIFACTORY_TOKEN" ]] || credentials_via_browser
+    ARTIFACTORY_TOKEN=""
+    if command -v jf >/dev/null 2>&1 && confirm "Generer le jeton avec la JFrog CLI ?" y; then
+        credentials_via_jf || warn "Echec de la JFrog CLI, passage par le navigateur"
     fi
+    [[ -n "$ARTIFACTORY_TOKEN" ]] || credentials_via_browser
     [[ -n "$ARTIFACTORY_TOKEN" ]] || die "Aucun jeton saisi"
 
-    info "Enregistrement des identifiants (http-basic.$SOURCE_NAME)"
-    poetry config "http-basic.$SOURCE_NAME" "$ARTIFACTORY_USER" "$ARTIFACTORY_TOKEN"
+    # Backend keyring 'fail' : Poetry ecrit alors le jeton en clair dans auth.toml
+    info "Enregistrement dans $auth_file"
+    PYTHON_KEYRING_BACKEND=keyring.backends.fail.Keyring \
+        poetry config "http-basic.$SOURCE_NAME" "$user" "$ARTIFACTORY_TOKEN"
+    chmod 600 "$auth_file"
 
-    if command -v curl >/dev/null 2>&1; then
-        if curl "${curl_opts[@]}" -u "$ARTIFACTORY_USER:$ARTIFACTORY_TOKEN" "${SOURCE_URL%/}/"; then
-            info "Connexion a $SOURCE_URL reussie"
-        else
-            warn "Impossible d'acceder a $SOURCE_URL avec ces identifiants"
-        fi
+    local curl_opts=(-fsS -o /dev/null -u "$user:$ARTIFACTORY_TOKEN")
+    case "$ARTIFACTORY_CERT" in
+        false) curl_opts+=(-k) ;;
+        "")    ;;
+        *)     curl_opts+=(--cacert "$ARTIFACTORY_CERT") ;;
+    esac
+    if curl "${curl_opts[@]}" "$SOURCE_URL/"; then
+        info "Connexion a $SOURCE_URL reussie"
+    else
+        warn "Impossible d'acceder a $SOURCE_URL avec ces identifiants"
     fi
 }
 
-# Ajoute a l'activate du virtualenv l'export de LD_LIBRARY_PATH vers les libs Qt5
+# Ajoute a .venv/bin/activate l'export de LD_LIBRARY_PATH vers les libs Qt5
 setup_pyqt5_env() {
     local activate="$PROJECT_DIR/.venv/bin/activate"
     local marker="# >>> setup_poetry PyQt5 >>>"
 
-    if [[ ! -f "$activate" ]]; then
-        warn "$activate introuvable, a ajouter manuellement :"
-        warn "  export LD_LIBRARY_PATH=\"\$(python3 -c \"import PyQt5, os; print(os.path.join(os.path.dirname(PyQt5.__file__), 'Qt5', 'lib'))\"):\$LD_LIBRARY_PATH\""
-        return
-    fi
+    [[ -f "$activate" ]] || { warn "$activate introuvable"; return; }
     grep -qF "$marker" "$activate" && return
 
     info "Ajout de LD_LIBRARY_PATH (libs Qt5) a $activate"
     cat >> "$activate" <<'EOF'
 
 # >>> setup_poetry PyQt5 >>>
-_pyqt5_lib="$(python -c "import PyQt5, os; print(os.path.join(os.path.dirname(PyQt5.__file__), 'Qt5', 'lib'))" 2>/dev/null)"
+_pyqt5_lib="$(python3 -c "import PyQt5, os; print(os.path.join(os.path.dirname(PyQt5.__file__), 'Qt5', 'lib'))" 2>/dev/null)"
 if [ -n "$_pyqt5_lib" ]; then
     export LD_LIBRARY_PATH="$_pyqt5_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
@@ -360,54 +383,133 @@ EOF
 step_deps() {
     require_pyproject
 
-    if yes_no "$INSTALL_PYQT5" "Installer PyQt5 ?" n; then
-        info "Ajout de PyQt5 (PyQt5-Qt5 epingle en $PYQT5_QT5_VERSION)"
-        poetry add PyQt5 "PyQt5-Qt5==$PYQT5_QT5_VERSION"
+    if confirm "Installer ${PYQT5_DEPS[*]} ?" n; then
+        poetry add "${PYQT5_DEPS[@]}"
         setup_pyqt5_env
     fi
 
-    if yes_no "$INSTALL_DATACLASSES" "Installer dataclasses (backport Python 3.6) ?" n; then
-        info "Ajout de dataclasses pour Python < 3.7"
-        poetry add dataclasses --python "<3.7"
+    if confirm "Installer $DATACLASSES_DEP (backport Python 3.6) ?" n; then
+        # Marqueur python < 3.7 : rien a changer lors d'un passage a Python >= 3.7
+        poetry add "$DATACLASSES_DEP" --python "<3.7"
     fi
+}
+
+# Reglages des outils de dev pour Python 3.6, ajoutes s'ils sont absents
+write_tools_config() {
+    toml_has_section tool.black || cat >> pyproject.toml <<'EOF'
+
+[tool.black]
+target-version = ["py36"]
+EOF
+    toml_has_section tool.isort || cat >> pyproject.toml <<'EOF'
+
+[tool.isort]
+profile = "black"
+EOF
+    toml_has_section tool.mypy || cat >> pyproject.toml <<'EOF'
+
+[tool.mypy]
+python_version = "3.6"
+EOF
+    toml_has_section tool.pylint.master || cat >> pyproject.toml <<'EOF'
+
+[tool.pylint.master]
+py-version = "3.6"
+EOF
+    toml_has_section tool.coverage.run || cat >> pyproject.toml <<'EOF'
+
+[tool.coverage.run]
+branch = true
+EOF
+}
+
+# Configuration pre-commit 'repo: local' : les hooks utilisent les outils du .venv
+write_precommit_config() {
+    local config="$1" venv_bin="$2"
+    cat > "$config" <<EOF
+repos:
+  - repo: local
+    hooks:
+      - id: trailing-whitespace
+        name: trailing-whitespace
+        entry: $venv_bin/trailing-whitespace-fixer
+        language: system
+        types: [text]
+      - id: end-of-file-fixer
+        name: end-of-file-fixer
+        entry: $venv_bin/end-of-file-fixer
+        language: system
+        types: [text]
+      - id: check-yaml
+        name: check-yaml
+        entry: $venv_bin/check-yaml
+        language: system
+        types: [yaml]
+      - id: check-toml
+        name: check-toml
+        entry: $venv_bin/check-toml
+        language: system
+        types: [toml]
+      - id: check-added-large-files
+        name: check-added-large-files
+        entry: $venv_bin/check-added-large-files
+        language: system
+      - id: isort
+        name: isort
+        entry: $venv_bin/isort
+        language: system
+        types: [python]
+      - id: black
+        name: black
+        entry: $venv_bin/black
+        language: system
+        types: [python]
+      - id: pylint
+        name: pylint
+        entry: $venv_bin/pylint
+        language: system
+        types: [python]
+      - id: mypy
+        name: mypy
+        entry: $venv_bin/mypy
+        language: system
+        types: [python]
+EOF
 }
 
 step_devtools() {
     require_pyproject
 
-    local tools extra
-    read -r -a tools <<< "$DEV_TOOLS"
-    ask extra "Outils de dev supplementaires (ex : pytest black flake8)" ""
-    [[ -n "$extra" ]] && read -r -a tools <<< "${tools[*]} $extra"
-
-    if [[ ${#tools[@]} -gt 0 ]]; then
-        info "Ajout au groupe dev : ${tools[*]}"
-        # shellcheck disable=SC2046
-        poetry add $(dev_group_args) "${tools[@]}"
+    info "Outils de dev : ${DEV_TOOLS[*]}"
+    if confirm "Ajouter ces outils au groupe dev ?" y; then
+        poetry add --dev "${DEV_TOOLS[@]}"
+        write_tools_config
     fi
-
-    [[ " ${tools[*]} " == *" pre-commit "* ]] || return 0
 
     local git_root
     if ! git_root="$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null)"; then
-        warn "Pas de depot git, 'pre-commit install' ignore"
+        warn "Pas de depot git, configuration pre-commit ignoree"
         return
     fi
 
-    local config="$git_root/.pre-commit-config.yaml"
-    if [[ ! -f "$config" ]]; then
+    local config="$git_root/.pre-commit-config.yaml" source_config=""
+    ask source_config "Chemin du .pre-commit-config.yaml a reprendre (vide : config locale par defaut)" ""
+
+    if [[ -n "$source_config" ]]; then
+        source_config="${source_config/#\~/$HOME}"
+        [[ -f "$source_config" ]] || die "Fichier introuvable : $source_config"
+        if [[ "$(realpath "$source_config")" != "$(realpath -m "$config")" ]]; then
+            if [[ ! -f "$config" ]] || confirm "Ecraser $config ?" n; then
+                info "Copie de $source_config vers $config"
+                cp "$source_config" "$config"
+            fi
+        fi
+    elif [[ ! -f "$config" ]] || confirm "Ecraser $config par la config locale par defaut ?" n; then
+        # Chemin du .venv relatif a la racine du depot, d'ou pre-commit lance les hooks
+        local venv_bin
+        venv_bin="$(realpath -m --relative-to="$git_root" "$PROJECT_DIR/.venv/bin")"
         info "Creation de $config"
-        cat > "$config" <<'EOF'
-repos:
-  - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.6.0
-    hooks:
-      - id: trailing-whitespace
-      - id: end-of-file-fixer
-      - id: check-yaml
-      - id: check-toml
-      - id: check-added-large-files
-EOF
+        write_precommit_config "$config" "$venv_bin"
     fi
 
     info "Installation du hook git pre-commit"
@@ -418,6 +520,11 @@ step_install() {
     require_pyproject
     info "Installation des dependances"
     poetry install --no-root
+
+    # Le .venv a pu etre recree : on remet l'export LD_LIBRARY_PATH
+    if has_dependency pyqt5; then
+        setup_pyqt5_env
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -425,29 +532,37 @@ step_install() {
 # ---------------------------------------------------------------------------
 main() {
     local steps=()
+    PROJECT_DIR=""
 
-    for arg in "$@"; do
-        case "$arg" in
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
             -h|--help) usage; exit 0 ;;
-            -y|--yes) ASSUME_YES=1 ;;
-            init|config|source|credentials|deps|devtools|install) steps+=("$arg") ;;
-            *) usage; die "Etape inconnue : $arg" ;;
+            -d|--project-dir)
+                [[ $# -ge 2 ]] || die "Option $1 : repertoire manquant"
+                PROJECT_DIR="$2"
+                shift
+                ;;
+            pkginfo|init|config|source|credentials|deps|devtools|install) steps+=("$1") ;;
+            *) usage; die "Argument inconnu : $1" ;;
         esac
+        shift
     done
 
     [[ ${#steps[@]} -eq 0 ]] && steps=("${ALL_STEPS[@]}")
 
-    command -v poetry >/dev/null 2>&1 \
-        || die "Poetry introuvable (https://python-poetry.org/docs/#installation)"
-    POETRY_VERSION="$(poetry_version)"
-    info "Poetry $POETRY_VERSION, projet : $PROJECT_DIR"
+    [[ -t 0 ]] || die "Script interactif : a lancer depuis un terminal"
+    command -v poetry >/dev/null 2>&1 || die "Poetry introuvable"
 
-    if is_interactive && [[ " ${steps[*]} " =~ \ (source|credentials)\  ]]; then
-        ask ARTIFACTORY_URL "URL Artifactory" "$ARTIFACTORY_URL"
-        ask ARTIFACTORY_REPO "Depot PyPI Artifactory" "$ARTIFACTORY_REPO"
+    if [[ -z "$PROJECT_DIR" ]]; then
+        PROJECT_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
     fi
-    ARTIFACTORY_URL="${ARTIFACTORY_URL%/}"
-    SOURCE_URL="${SOURCE_URL:-$ARTIFACTORY_URL/artifactory/api/pypi/$ARTIFACTORY_REPO/simple}"
+    mkdir -p "$PROJECT_DIR"
+    PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+
+    POETRY_VERSION="$(poetry --version | grep -oE '[0-9]+(\.[0-9]+)+' | head -n1)"
+    [[ "$POETRY_VERSION" == 1.1.* ]] \
+        || warn "Script prevu pour Poetry 1.1.x, version detectee : $POETRY_VERSION"
+    info "Poetry $POETRY_VERSION, projet : $PROJECT_DIR"
 
     local global_start
     global_start=$(date +%s)
