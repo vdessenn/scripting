@@ -10,7 +10,7 @@
 #                (~/.config/pypoetry) et en local (poetry.toml) ; certificat
 #                Artifactory en global uniquement (auth.toml)
 #   source       Source Artifactory unique par defaut ([[tool.poetry.source]])
-#   credentials  Utilisateur + jeton Artifactory (JFrog CLI ou navigateur),
+#   credentials  Utilisateur + jeton Artifactory (config JFrog CLI ou navigateur),
 #                stockes en clair dans ~/.config/pypoetry/auth.toml
 #   deps         Propose PyQt5 (+ LD_LIBRARY_PATH dans .venv/bin/activate)
 #                et dataclasses (backport Python 3.6)
@@ -350,17 +350,38 @@ default = true
 EOF
 }
 
-# Jeton via la JFrog CLI (configuration du serveur au besoin)
+# Utilisateur et jeton enregistres dans la config de la JFrog CLI
+# (configuration du serveur au besoin, reconfiguration a partir du 2e essai)
 credentials_via_jf() {
+    local attempt="$1"
     if ! jf config show "$JF_SERVER_ID" >/dev/null 2>&1; then
-        info "Configuration du serveur JFrog '$JF_SERVER_ID' (choisir 'Web Login' si propose)"
+        info "Configuration du serveur JFrog '$JF_SERVER_ID'"
+        info "(methode conseillee : 'Username and Password / Reference token', avec le jeton)"
         jf config add "$JF_SERVER_ID" --url="$ARTIFACTORY_URL" --interactive=true || return 1
+    elif [[ "$attempt" -gt 1 ]] && confirm "Reconfigurer le serveur JFrog '$JF_SERVER_ID' ?" y; then
+        jf config edit "$JF_SERVER_ID" || return 1
     fi
 
-    info "Creation d'un jeton d'acces via la JFrog CLI"
-    local json
-    json="$(jf access-token-create --server-id="$JF_SERVER_ID")" || return 1
-    ARTIFACTORY_TOKEN="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["access_token"])' <<< "$json")"
+    # 'jf config export' : JSON encode en base64 (user, password, accessToken, ...)
+    local exported creds
+    exported="$(jf config export "$JF_SERVER_ID")" || return 1
+    creds="$(python3 -c '
+import base64, json, sys
+conf = json.loads(base64.b64decode(sys.stdin.read().strip()).decode())
+token = conf.get("password") or conf.get("accessToken") or ""
+user = conf.get("user") or ""
+if not user and conf.get("accessToken"):
+    # Jeton JWT : sub = "jfrt@<id>/users/<utilisateur>"
+    payload = conf["accessToken"].split(".")[1]
+    payload += "=" * (-len(payload) % 4)
+    sub = json.loads(base64.urlsafe_b64decode(payload).decode()).get("sub", "")
+    user = sub.rsplit("/users/", 1)[1] if "/users/" in sub else ""
+print(user)
+print(token)
+' <<< "$exported")" || return 1
+    { read -r ARTIFACTORY_USER; read -r ARTIFACTORY_TOKEN; } <<< "$creds"
+    [[ -n "$ARTIFACTORY_TOKEN" ]] || { warn "Aucun jeton dans la config JFrog '$JF_SERVER_ID'"; return 1; }
+    info "Jeton lu dans la config JFrog '$JF_SERVER_ID'"
 }
 
 # Renvoie vers l'interface web pour se connecter et recuperer le jeton
@@ -374,6 +395,21 @@ credentials_via_browser() {
     ask_secret ARTIFACTORY_TOKEN "Jeton Artifactory"
 }
 
+# check_credentials <utilisateur> <jeton> : acces a l'index de la source
+check_credentials() {
+    local curl_opts=(-fsS -o /dev/null -u "$1:$2")
+    case "$ARTIFACTORY_CERT" in
+        false) if [[ -n "${REQUESTS_CA_BUNDLE:-}" ]]; then
+                   curl_opts+=(--cacert "$REQUESTS_CA_BUNDLE")
+               else
+                   curl_opts+=(-k)
+               fi ;;
+        "")    ;;
+        *)     curl_opts+=(--cacert "$ARTIFACTORY_CERT") ;;
+    esac
+    curl "${curl_opts[@]}" "$SOURCE_URL/"
+}
+
 step_credentials() {
     local auth_file="$POETRY_CONFIG_DIR/auth.toml"
     if grep -qsF "[http-basic.$SOURCE_NAME]" "$auth_file" \
@@ -381,33 +417,43 @@ step_credentials() {
         return
     fi
 
-    local user
-    ask user "Utilisateur Artifactory" "${USER:-}"
+    local attempt=0 user="${USER:-}"
+    while :; do
+        attempt=$((attempt + 1))
+        ARTIFACTORY_USER=""
+        ARTIFACTORY_TOKEN=""
 
-    ARTIFACTORY_TOKEN=""
-    if command -v jf >/dev/null 2>&1 && confirm "Generer le jeton avec la JFrog CLI ?" y; then
-        credentials_via_jf || warn "Echec de la JFrog CLI, passage par le navigateur"
-    fi
-    [[ -n "$ARTIFACTORY_TOKEN" ]] || credentials_via_browser
-    [[ -n "$ARTIFACTORY_TOKEN" ]] || die "Aucun jeton saisi"
+        if command -v jf >/dev/null 2>&1 && confirm "Utiliser les identifiants de la JFrog CLI ?" y; then
+            credentials_via_jf "$attempt" || warn "Echec de la JFrog CLI, passage par le navigateur"
+        fi
+        local default_user="${ARTIFACTORY_USER:-$user}"
+        user=""
+        while [[ -z "$user" ]]; do
+            ask user "Utilisateur Artifactory" "$default_user"
+        done
+        [[ -n "$ARTIFACTORY_TOKEN" ]] || credentials_via_browser
+
+        if [[ -z "$ARTIFACTORY_TOKEN" ]]; then
+            warn "Aucun jeton saisi"
+        elif check_credentials "$user" "$ARTIFACTORY_TOKEN"; then
+            info "Connexion a $SOURCE_URL reussie"
+            break
+        else
+            warn "Impossible d'acceder a $SOURCE_URL avec ces identifiants"
+        fi
+
+        if ! confirm "Ressaisir les identifiants ?" y; then
+            [[ -n "$ARTIFACTORY_TOKEN" ]] || die "Aucun jeton saisi"
+            warn "Identifiants enregistres sans connexion reussie"
+            break
+        fi
+    done
 
     # Backend keyring 'fail' : Poetry ecrit alors le jeton en clair dans auth.toml
     info "Enregistrement dans $auth_file"
     PYTHON_KEYRING_BACKEND=keyring.backends.fail.Keyring \
         poetry config "http-basic.$SOURCE_NAME" "$user" "$ARTIFACTORY_TOKEN"
     chmod 600 "$auth_file"
-
-    local curl_opts=(-fsS -o /dev/null -u "$user:$ARTIFACTORY_TOKEN")
-    case "$ARTIFACTORY_CERT" in
-        false) curl_opts+=(-k) ;;
-        "")    ;;
-        *)     curl_opts+=(--cacert "$ARTIFACTORY_CERT") ;;
-    esac
-    if curl "${curl_opts[@]}" "$SOURCE_URL/"; then
-        info "Connexion a $SOURCE_URL reussie"
-    else
-        warn "Impossible d'acceder a $SOURCE_URL avec ces identifiants"
-    fi
 }
 
 # Ajoute a .venv/bin/activate l'export de LD_LIBRARY_PATH vers les libs Qt5
