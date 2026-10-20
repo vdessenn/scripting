@@ -449,7 +449,8 @@ main() {
     ARTIFACTORY_URL="${ARTIFACTORY_URL%/}"
     SOURCE_URL="${SOURCE_URL:-$ARTIFACTORY_URL/artifactory/api/pypi/$ARTIFACTORY_REPO/simple}"
 
-    local global_start=$(date +%s)
+    local global_start
+    global_start=$(date +%s)
     for step in "${steps[@]}"; do
         run_step "$step"
     done
