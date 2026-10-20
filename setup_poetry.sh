@@ -252,9 +252,17 @@ resolve_cert() {
         return
     fi
 
-    warn "Poetry $POETRY_VERSION ne supporte pas 'certificates.$SOURCE_NAME.cert false' (Poetry >= 1.2)"
-    warn "Il faut indiquer le bundle CA qui valide le certificat d'Artifactory"
+    info "Poetry $POETRY_VERSION ne supporte pas 'certificates.$SOURCE_NAME.cert false' (Poetry >= 1.2) :"
+    info "utilisation du bundle CA qui valide le certificat d'Artifactory"
 
+    if [[ -n "${REQUESTS_CA_BUNDLE:-}" ]]; then
+        [[ -f "$REQUESTS_CA_BUNDLE" ]] || die "REQUESTS_CA_BUNDLE introuvable : $REQUESTS_CA_BUNDLE"
+        info "Bundle CA de REQUESTS_CA_BUNDLE : $REQUESTS_CA_BUNDLE"
+        ARTIFACTORY_CERT="$REQUESTS_CA_BUNDLE"
+        return
+    fi
+
+    warn "REQUESTS_CA_BUNDLE non defini"
     local default="" candidate
     for candidate in /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt; do
         [[ -f "$candidate" ]] && { default="$candidate"; break; }
