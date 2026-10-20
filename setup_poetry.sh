@@ -296,13 +296,46 @@ step_config() {
     fi
 }
 
+# source_toml [nouvelle_url] : parcourt les blocs [[tool.poetry.source]] et
+# affiche l'URL de la source $SOURCE_NAME ou, avec un argument, reecrit le
+# fichier en remplacant cette URL
+source_toml() {
+    awk -v name="$SOURCE_NAME" -v new_url="${1:-}" '
+        function flush(   i, line) {
+            for (i = 1; i <= n; i++) {
+                line = buf[i]
+                if (found && line ~ /^url *=/) {
+                    if (new_url == "") { sub(/^url *= *"/, "", line); sub(/".*$/, "", line); print line }
+                    else line = "url = \"" new_url "\""
+                }
+                if (new_url != "") print line
+            }
+            n = 0; found = 0
+        }
+        /^\[/ { flush(); in_source = ($0 ~ /^\[\[tool\.poetry\.source\]\]/) }
+        { buf[++n] = $0; if (in_source && $0 ~ "^name *= *\"" name "\"") found = 1 }
+        END { flush() }
+    ' pyproject.toml
+}
+
 step_source() {
     require_pyproject
 
-    if grep -qE "^name = \"$SOURCE_NAME\"" pyproject.toml; then
+    local current_url tmp
+    current_url="$(source_toml)"
+    if [[ -n "$current_url" ]]; then
         info "Source '$SOURCE_NAME' deja definie dans pyproject.toml"
-        grep -qF "url = \"$SOURCE_URL\"" pyproject.toml \
-            || warn "Son URL differe de $SOURCE_URL, a verifier dans pyproject.toml"
+        [[ "$current_url" == "$SOURCE_URL" ]] && return
+
+        warn "URL actuelle  : $current_url"
+        warn "URL attendue  : $SOURCE_URL"
+        if confirm "Remplacer l'URL de la source '$SOURCE_NAME' ?" n; then
+            tmp="$(mktemp)"
+            source_toml "$SOURCE_URL" > "$tmp"
+            cat "$tmp" > pyproject.toml
+            rm -f "$tmp"
+            info "URL de la source '$SOURCE_NAME' remplacee"
+        fi
         return
     fi
 
