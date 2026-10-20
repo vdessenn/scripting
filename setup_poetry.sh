@@ -201,31 +201,36 @@ find_pkginfo() {
     "${interp[@]}" -c 'import pkginfo.distribution as d; print(d.__file__)' 2>/dev/null
 }
 
-# pkginfo 1.10 (dernier compatible Python 3.6) ignore les metadonnees 2.4 :
-# Poetry 1.1 ne voit alors pas le Requires-Python des paquets recents et
-# choisit des versions incompatibles avec Python 3.6
+# pkginfo 1.10 (dernier compatible Python 3.6) ignore les metadonnees de version
+# inconnue (2.4, 2.5, ...) : Poetry 1.1 ne voit alors pas le Requires-Python des
+# paquets recents et choisit des versions incompatibles avec Python 3.6.
+# Correctif : lire une version inconnue comme la plus recente connue.
 step_pkginfo() {
     local file
+    local original="return HEADER_ATTRS.get(self.metadata_version, [])"
+    local patched="return HEADER_ATTRS.get(self.metadata_version, max(HEADER_ATTRS.items())[1])"
+
     file="$(find_pkginfo)"
     [[ -n "$file" && -f "$file" ]] || { warn "pkginfo de Poetry introuvable, etape ignoree"; return; }
 
-    if ! grep -q "^ *'2\.3': HEADER_ATTRS_2_3," "$file"; then
-        info "$file ne necessite pas de correctif"
-        return
-    fi
-    if grep -q "^ *'2\.4':" "$file"; then
+    if grep -qF "$patched" "$file"; then
         info "pkginfo deja corrige ($file)"
         return
     fi
+    if ! grep -qF "$original" "$file"; then
+        info "$file ne necessite pas de correctif"
+        return
+    fi
 
-    warn "pkginfo ne lit pas les metadonnees 2.4 : Poetry peut choisir des versions"
+    warn "pkginfo ignore les metadonnees recentes (2.4+) : Poetry peut choisir des versions"
     warn "incompatibles avec Python 3.6 (ex : attrs 26.1.0 qui requiert Python >= 3.9)"
     confirm "Corriger $file (sauvegarde en .orig) ?" y || return 0
 
     local sudo=""
     [[ -w "$file" ]] || sudo="sudo"
     $sudo cp -n "$file" "$file.orig"
-    $sudo sed -i "s/^\( *\)'2\.3': HEADER_ATTRS_2_3,$/&\n\1'2.4': HEADER_ATTRS_2_3,/" "$file"
+    $sudo sed -i 's/return HEADER_ATTRS\.get(self\.metadata_version, \[\])/return HEADER_ATTRS.get(self.metadata_version, max(HEADER_ATTRS.items())[1])/' "$file"
+    grep -qF "$patched" "$file" || die "Echec du correctif de $file"
     info "Correctif applique"
 
     # Les metadonnees deja en cache ont ete lues sans Requires-Python
