@@ -64,6 +64,10 @@ DEV_TOOLS=(
     pre-commit-hooks==4.1.0
 )
 
+# Binaire Poetry : chemin complet si poetry n'est pas dans le PATH
+# (un alias du shell n'est pas visible depuis un script)
+POETRY_BIN="${POETRY_BIN:-poetry}"
+
 POETRY_CONFIG_DIR="${POETRY_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/pypoetry}"
 
 ALL_STEPS=(pkginfo init config source credentials deps devtools install)
@@ -92,7 +96,7 @@ Options :
   -d, --project-dir DIR  Repertoire du projet Python (defaut : racine du depot git)
   -h, --help             Affiche cette aide
 
-Poetry : trouve via POETRY_CMD, le PATH ou l'alias 'poetry' du shell
+Poetry : $POETRY_BIN (variable POETRY_BIN en tete du script)
 
 Source Artifactory : $SOURCE_URL
 (a modifier en tete de script ou via ARTIFACTORY_URL / ARTIFACTORY_REPO)
@@ -140,50 +144,9 @@ version_ge() {
     [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" == "$2" ]]
 }
 
-# Commande Poetry : $POETRY_CMD, sinon le PATH, sinon l'alias 'poetry' du shell
-# de l'utilisateur (un script ne voit pas les alias du shell interactif)
-POETRY_CMD_ARRAY=()
-resolve_poetry() {
-    local word
-    POETRY_CMD_ARRAY=()
-
-    if [[ -n "${POETRY_CMD:-}" ]]; then
-        # eval : decoupage en mots et expansion de ~ / $VAR comme le ferait le shell
-        set +u
-        eval "POETRY_CMD_ARRAY=($POETRY_CMD)"
-        set -u
-    elif type -P poetry >/dev/null; then
-        POETRY_CMD_ARRAY=("$(type -P poetry)")
-    else
-        # L'alias est developpe par le shell de l'utilisateur, la ou ses variables
-        # (.bashrc / .zshrc) existent. Un mot par ligne, avec un marqueur pour
-        # ignorer ce que le shell affiche au demarrage.
-        #   eval "v=$v"      : retire les guillemets de 'alias poetry' -> texte de l'alias
-        #   eval "set -- $v" : le developpe comme lors de son utilisation (~, $VAR)
-        # shellcheck disable=SC2016  # code execute par le shell de l'utilisateur
-        while IFS= read -r word; do
-            POETRY_CMD_ARRAY+=("$word")
-        done < <("${SHELL:-bash}" -ic '
-            v=$(alias poetry 2>/dev/null) || exit 0
-            v=${v#alias }
-            v=${v#poetry=}
-            eval "v=$v"
-            eval "set -- $v"
-            for w in "$@"; do printf "@@poetry@@%s\n" "$w"; done
-        ' 2>/dev/null </dev/null | sed -n 's/^.*@@poetry@@//p' | tr -d '\r')
-
-        if [[ ${#POETRY_CMD_ARRAY[@]} -gt 0 ]]; then
-            info "Poetry via l'alias du shell : ${POETRY_CMD_ARRAY[*]}"
-        fi
-    fi
-
-    # Tableau vide + set -u : erreur 'unbound variable' avec bash < 4.4
-    [[ ${#POETRY_CMD_ARRAY[@]} -gt 0 ]]
-}
-
-# Toutes les commandes 'poetry' du script passent par la commande resolue
+# Toutes les commandes 'poetry' du script appellent $POETRY_BIN
 poetry() {
-    command "${POETRY_CMD_ARRAY[@]}" "$@"
+    command "$POETRY_BIN" "$@"
 }
 
 # poetry_config <args...> : applique un reglage en global puis en local
@@ -244,32 +207,17 @@ step_init() {
 
 # Fichier pkginfo/distribution.py charge par Poetry (vendorise ou dans son interpreteur)
 find_pkginfo() {
-    local first poetry_bin="" shebang candidate interp=()
-    first="$(type -P "${POETRY_CMD_ARRAY[0]}" || true)"
+    local poetry_bin shebang interp candidate
+    poetry_bin="$(readlink -f "$(type -P "$POETRY_BIN")")"
 
-    # Commande du type 'python3 /chemin/poetry' ou 'python3 -m poetry'
-    if [[ "$(basename "$first")" == python* ]]; then
-        interp=("$first")
-        if [[ -f "${POETRY_CMD_ARRAY[1]:-}" ]]; then
-            poetry_bin="$(readlink -f "${POETRY_CMD_ARRAY[1]}")"
-        fi
-    else
-        poetry_bin="$(readlink -f "$first")"
-    fi
-
-    if [[ -n "$poetry_bin" ]]; then
-        # Installation get-poetry.py : dependances vendorisees dans ~/.poetry/lib
-        for candidate in "$(dirname "$poetry_bin")"/../lib/poetry/_vendor/py3*/pkginfo/distribution.py; do
-            [[ -f "$candidate" ]] && { realpath "$candidate"; return; }
-        done
-        if [[ ${#interp[@]} -eq 0 ]]; then
-            shebang="$(head -n1 "$poetry_bin")"
-            read -r -a interp <<< "${shebang#\#!}"
-        fi
-    fi
+    # Installation get-poetry.py : dependances vendorisees dans ~/.poetry/lib
+    for candidate in "$(dirname "$poetry_bin")"/../lib/poetry/_vendor/py3*/pkginfo/distribution.py; do
+        [[ -f "$candidate" ]] && { realpath "$candidate"; return; }
+    done
 
     # Installation pip / install-poetry.py : pkginfo de l'interpreteur de Poetry
-    [[ ${#interp[@]} -gt 0 ]] || return 0
+    shebang="$(head -n1 "$poetry_bin")"
+    read -r -a interp <<< "${shebang#\#!}"
     "${interp[@]}" -c 'import pkginfo.distribution as d; print(d.__file__)' 2>/dev/null || true
 }
 
@@ -716,8 +664,8 @@ main() {
     [[ ${#steps[@]} -eq 0 ]] && steps=("${ALL_STEPS[@]}")
 
     [[ -t 0 ]] || die "Script interactif : a lancer depuis un terminal"
-    resolve_poetry || die "Poetry introuvable (PATH, alias) : definir POETRY_CMD, ex : POETRY_CMD=\"python3 ~/.poetry/bin/poetry\""
-    poetry --version >/dev/null 2>&1 || die "Commande Poetry inutilisable : ${POETRY_CMD_ARRAY[*]}"
+    type -P "$POETRY_BIN" >/dev/null \
+        || die "Poetry introuvable : '$POETRY_BIN' (renseigner POETRY_BIN en tete du script)"
 
     if [[ -z "$PROJECT_DIR" ]]; then
         PROJECT_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
