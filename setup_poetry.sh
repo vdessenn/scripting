@@ -24,6 +24,11 @@
 #   ./setup_poetry.sh -h                  # affiche l'aide
 #
 
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "Ce script doit etre lance avec bash : ./setup_poetry.sh ou bash setup_poetry.sh" >&2
+    exit 1
+fi
+
 set -Eeuo pipefail
 
 # ---------------------------------------------------------------------------
@@ -146,8 +151,10 @@ resolve_poetry() {
     fi
     if [[ -z "$cmd" ]]; then
         # bash : alias poetry='...'  /  zsh : poetry='...'
+        # Codes couleur / retours chariot eventuels du prompt retires
         cmd="$("${SHELL:-bash}" -ic 'alias poetry' 2>/dev/null </dev/null \
-            | grep -E '^(alias )?poetry=' | tail -n1)"
+            | sed 's/\x1b\][^\x07]*\x07//g; s/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\r//g' \
+            | grep -oE '(alias )?\bpoetry=.*' | tail -n1 || true)"
         cmd="${cmd#alias }"
         cmd="${cmd#poetry=}"
         if [[ "$cmd" == \'*\' || "$cmd" == \"*\" ]]; then
@@ -159,6 +166,8 @@ resolve_poetry() {
     [[ -n "$cmd" ]] || return 1
     # eval : decoupage en mots et expansion de ~ comme le ferait le shell
     eval "POETRY_CMD_ARRAY=($cmd)"
+    # Tableau vide + set -u : erreur 'unbound variable' avec bash < 4.4
+    [[ ${#POETRY_CMD_ARRAY[@]} -gt 0 ]]
 }
 
 # Toutes les commandes 'poetry' du script passent par la commande resolue
@@ -250,7 +259,7 @@ find_pkginfo() {
 
     # Installation pip / install-poetry.py : pkginfo de l'interpreteur de Poetry
     [[ ${#interp[@]} -gt 0 ]] || return 0
-    "${interp[@]}" -c 'import pkginfo.distribution as d; print(d.__file__)' 2>/dev/null
+    "${interp[@]}" -c 'import pkginfo.distribution as d; print(d.__file__)' 2>/dev/null || true
 }
 
 # pkginfo 1.10 (dernier compatible Python 3.6) ignore les metadonnees de version
