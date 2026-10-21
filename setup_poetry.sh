@@ -144,39 +144,28 @@ version_ge() {
 # de l'utilisateur (un script ne voit pas les alias du shell interactif)
 POETRY_CMD_ARRAY=()
 resolve_poetry() {
-    local word
-    POETRY_CMD_ARRAY=()
+    local cmd="${POETRY_CMD:-}"
 
-    if [[ -n "${POETRY_CMD:-}" ]]; then
-        # eval : decoupage en mots et expansion de ~ / $VAR comme le ferait le shell
-        set +u
-        eval "POETRY_CMD_ARRAY=($POETRY_CMD)"
-        set -u
-    elif type -P poetry >/dev/null; then
-        POETRY_CMD_ARRAY=("$(type -P poetry)")
-    else
-        # L'alias est developpe par le shell de l'utilisateur, la ou ses variables
-        # (.bashrc / .zshrc) existent. Un mot par ligne, avec un marqueur pour
-        # ignorer ce que le shell affiche au demarrage.
-        #   eval "v=$v"      : retire les guillemets de 'alias poetry' -> texte de l'alias
-        #   eval "set -- $v" : le developpe comme lors de son utilisation (~, $VAR)
-        # shellcheck disable=SC2016  # code execute par le shell de l'utilisateur
-        while IFS= read -r word; do
-            POETRY_CMD_ARRAY+=("$word")
-        done < <("${SHELL:-bash}" -ic '
-            v=$(alias poetry 2>/dev/null) || exit 0
-            v=${v#alias }
-            v=${v#poetry=}
-            eval "v=$v"
-            eval "set -- $v"
-            for w in "$@"; do printf "@@poetry@@%s\n" "$w"; done
-        ' 2>/dev/null </dev/null | sed -n 's/^.*@@poetry@@//p' | tr -d '\r')
-
-        if [[ ${#POETRY_CMD_ARRAY[@]} -gt 0 ]]; then
-            info "Poetry via l'alias du shell : ${POETRY_CMD_ARRAY[*]}"
+    if [[ -z "$cmd" ]] && type -P poetry >/dev/null; then
+        cmd="$(type -P poetry)"
+    fi
+    if [[ -z "$cmd" ]]; then
+        # bash : alias poetry='...'  /  zsh : poetry='...'
+        # Codes couleur / retours chariot eventuels du prompt retires
+        cmd="$("${SHELL:-bash}" -ic 'alias poetry' 2>/dev/null </dev/null \
+            | sed 's/\x1b\][^\x07]*\x07//g; s/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\r//g' \
+            | grep -oE '(alias )?\bpoetry=.*' | tail -n1 || true)"
+        cmd="${cmd#alias }"
+        cmd="${cmd#poetry=}"
+        if [[ "$cmd" == \'*\' || "$cmd" == \"*\" ]]; then
+            cmd="${cmd:1:${#cmd}-2}"
         fi
+        [[ -n "$cmd" ]] && info "Poetry via l'alias du shell : $cmd"
     fi
 
+    [[ -n "$cmd" ]] || return 1
+    # eval : decoupage en mots et expansion de ~ comme le ferait le shell
+    eval "POETRY_CMD_ARRAY=($cmd)"
     # Tableau vide + set -u : erreur 'unbound variable' avec bash < 4.4
     [[ ${#POETRY_CMD_ARRAY[@]} -gt 0 ]]
 }
