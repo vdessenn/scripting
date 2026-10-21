@@ -29,10 +29,7 @@ if [ -z "${BASH_VERSION:-}" ]; then
     exit 1
 fi
 
-# Pas de 'set -u' : l'environnement charge par le shell de chaque poste varie,
-# une variable absente ne doit pas interrompre le script (les valeurs
-# indispensables ont un defaut ou sont verifiees)
-set -Eeo pipefail
+set -Eeuo pipefail
 
 # ---------------------------------------------------------------------------
 # Configuration (a adapter)
@@ -190,7 +187,7 @@ step_init() {
     fi
     [[ -f pyproject.toml ]] && warn "pyproject.toml sans section Poetry : poetry init le completera"
 
-    local name="" version="" description="" author="" python=""
+    local name version description author python
     local git_author
     git_author="$(git config user.name 2>/dev/null || true)"
     [[ -n "$git_author" ]] && git_author="$git_author <$(git config user.email 2>/dev/null || true)>"
@@ -200,8 +197,6 @@ step_init() {
     ask description "Description" ""
     ask author "Auteur" "$git_author"
     ask python "Contrainte de version Python" "$PYTHON_CONSTRAINT"
-    python="${python:-$PYTHON_CONSTRAINT}"
-    version="${version:-0.1.0}"
 
     info "Initialisation du projet '$name' (python $python)"
     local args=(--no-interaction --name "$name" --description "$description" --python "$python")
@@ -678,8 +673,7 @@ main() {
     mkdir -p "$PROJECT_DIR"
     PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 
-    POETRY_VERSION="$(poetry --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+)+' | head -n1 || true)"
-    [[ -n "$POETRY_VERSION" ]] || die "'$POETRY_BIN --version' ne renvoie pas de version : verifier POETRY_BIN"
+    POETRY_VERSION="$(poetry --version | grep -oE '[0-9]+(\.[0-9]+)+' | head -n1)"
     [[ "$POETRY_VERSION" == 1.1.* ]] \
         || warn "Script prevu pour Poetry 1.1.x, version detectee : $POETRY_VERSION"
     info "Poetry $POETRY_VERSION, projet : $PROJECT_DIR"
