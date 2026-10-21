@@ -211,7 +211,12 @@ step_init() {
         info "pyproject.toml avec une section [tool.poetry] deja present, ignore"
         return
     fi
-    [[ -f pyproject.toml ]] && warn "pyproject.toml sans section Poetry : poetry init le completera"
+    if [[ -f pyproject.toml ]]; then
+        # Poetry 1.1 refuse de completer un pyproject.toml qui a un [build-system]
+        toml_has_section build-system \
+            && die "pyproject.toml sans [tool.poetry] mais avec [build-system] : poetry init refuse de le completer (retirer [build-system] ou ajouter [tool.poetry] a la main)"
+        warn "pyproject.toml sans section Poetry : poetry init le completera"
+    fi
 
     local name version description author python
     local git_author
@@ -225,10 +230,23 @@ step_init() {
     ask python "Contrainte de version Python" "$PYTHON_CONSTRAINT"
 
     info "Initialisation du projet '$name' (python $python)"
-    local args=(--no-interaction --name "$name" --description "$description" --python "$python")
+    # Options vides refusees par Poetry 1.1 ("requires a value") : omises
+    local args=(--no-interaction --name "$name" --python "$python")
+    [[ -n "$description" ]] && args+=(--description "$description")
     [[ -n "$author" ]] && args+=(--author "$author")
-    poetry init "${args[@]}"
-    poetry version "$version"
+    # Poetry 1.1 affiche toujours son texte d'accueil ("This command will guide
+    # you...") et ecrit ses erreurs sur la sortie standard : sortie affichee
+    # seulement en cas d'echec
+    local output
+    if ! output="$(poetry init "${args[@]}" 2>&1)"; then
+        printf '%s\n' "$output" >&2
+        die "Echec de poetry init"
+    fi
+    if ! output="$(poetry version "$version" 2>&1)"; then
+        printf '%s\n' "$output" >&2
+        die "Echec de poetry version $version"
+    fi
+    info "pyproject.toml cree"
 }
 
 # Fichier pkginfo/distribution.py charge par Poetry (vendorise ou dans son interpreteur)
