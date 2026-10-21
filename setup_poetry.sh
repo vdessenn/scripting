@@ -113,11 +113,55 @@ ask() {
 
 # ask_secret <variable> <question> : saisie masquee
 ask_secret() {
-    local __var="$1" question="$2" answer=""
-    read -r -s -p "$question : " answer || true
+    local __var="$1" question="$2" answer="" char esc="" in_esc=0 in_paste=0
+    printf '%s : ' "$question"
+    # Terminal sans echo et caractere par caractere pour toute la saisie :
+    # avec 'read -s', l'echo revient entre deux caracteres et un collage
+    # rapide s'affiche en clair ou perd des caracteres
+    SAVED_TTY="$(stty -g)"
+    stty -echo -icanon min 1 time 0
+    # Lecture caractere par caractere : une '*' par caractere (le collage est
+    # visible), Retour arriere gere, sequences d'echappement ignorees.
+    # Collage "bracketed paste" (ESC[200~ ... ESC[201~) : un retour a la ligne
+    # colle avec le jeton ne termine pas la saisie.
+    while IFS= read -r -n1 char; do
+        if [[ $in_esc -eq 1 ]]; then
+            esc+="$char"
+            if [[ "$char" == [A-Za-z~] ]]; then
+                in_esc=0
+                [[ "$esc" == "[200~" ]] && in_paste=1
+                [[ "$esc" == "[201~" ]] && in_paste=0
+            fi
+            continue
+        fi
+        case "$char" in
+            "")            [[ $in_paste -eq 1 ]] && continue
+                           break ;;
+            $'\e')         in_esc=1; esc="" ;;
+            $'\x7f'|$'\b') if [[ -n "$answer" ]]; then
+                               answer="${answer%?}"
+                               printf '\b \b'
+                           fi ;;
+            [[:space:]])   ;;
+            *)             answer+="$char"; printf '*' ;;
+        esac
+    done
+    restore_tty
     echo
+    [[ -n "$answer" ]] && info "Saisie recue (${#answer} caracteres)"
     printf -v "$__var" '%s' "$answer"
 }
+
+# Etat du terminal sauvegarde par ask_secret, restaure meme si le script
+# est interrompu pendant la saisie (Ctrl-C)
+SAVED_TTY=""
+restore_tty() {
+    if [[ -n "$SAVED_TTY" ]]; then
+        stty "$SAVED_TTY" 2>/dev/null || true
+        SAVED_TTY=""
+    fi
+}
+trap restore_tty EXIT
 
 # confirm <question> [y|n] : retourne 0 si oui
 confirm() {
